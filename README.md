@@ -45,34 +45,24 @@ macOS 首次打开需要在"系统设置 > 隐私与安全性"里允许运行（
 
 ## 🛠️ 从源码构建
 
-面向开发者，或 Releases 里没有对应平台安装包的情况。
+面向开发者，或 Releases 里没有对应平台安装包的情况。需要 Go 1.23+、Node.js 18+、[Wails v2](https://wails.io/docs/gettingstarted/installation/)。
 
-1. **环境要求**：Go 1.23+、Node.js 18+、[Wails v2](https://wails.io/docs/gettingstarted/installation/)
-2. **克隆仓库**：`git clone https://github.com/SciSail/sailboard.git`
-3. **开发调试**：
-   ```powershell
-   go test ./...
-   cd frontend && npm install && npm run build && cd ..
-   wails dev
-   ```
-   `wails dev` 会启动桌面应用和前端热更新，开发期间复制文本或完整 HTTP(S) 链接即可写入历史。
-4. **打包构建**：
-   ```powershell
-   wails build
-   ```
-   Windows 构建产物位于 `build/bin/SailBoard.exe`。macOS 上（需先装最新 Xcode Command Line Tools，见下）：
-   ```bash
-   CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64 -clean
-   ```
-   产物是 `build/bin/SailBoard.app`；打包成带"拖拽安装"背景图提示的 DMG（`create-dmg` 在部分 Homebrew 环境下会装不上，`build/darwin/package-dmg.sh` 用系统自带的 `hdiutil` + AppleScript 自己排版，不依赖它）：
-   ```bash
-   build/darwin/package-dmg.sh
-   ```
-   产物默认是 `build/bin/SailBoard-1.0.0-arm64.dmg`（可传第一个参数覆盖输出路径）。背景图 `build/darwin/dmg-background.png` 尺寸特意做成 600×400px，跟 Finder 窗口内容区 1:1 对应（Finder 会把 DMG 背景图缩放去适配窗口，不是按 @2x 资源处理，图片尺寸和脚本里的图标坐标必须匹配，否则文字/图标会错位）。
-   `CGO_LDFLAGS` 那行是绕开 Wails v2.10.2 在较旧 Xcode SDK 下漏链接 `UniformTypeIdentifiers` 框架的已知问题；如果 `wails build` 本身就因为 `internal error: package "fmt" without types was imported` 之类的信息报错，是 Wails CLI 自带的 `golang.org/x/tools` 版本跟不上较新 Go 工具链，把 `github.com/wailsapp/wails/v2/cmd/wails` 用 `go get -u golang.org/x/tools && go mod tidy` 更新后自行 `go build ./cmd/wails` 重装一份 CLI 即可，详见 `progress.md`。
-5. **开始使用**：按下 `Ctrl+Shift+V`（macOS 上 `Cmd+Shift+V`，或在设置中自定义的快捷键）唤出面板，选中卡片即可粘贴。
+```bash
+git clone https://github.com/SciSail/sailboard.git
+cd sailboard
+go test ./...
+wails dev      # 桌面应用 + 前端热更新
+wails build    # 打包，Windows 产物在 build/bin/SailBoard.exe
+```
 
-macOS 上 `internal/platform.Controller` 接口的全部能力（窗口定位/滑动动效/失焦自动隐藏、全局热键、菜单栏图标、剪贴板图片/富文本/文件读写、来源应用图标、文件缩略图、自动粘贴注入、开机启动、单实例互斥、设置窗口跨进程通知）均已是真实原生实现（Cocoa + Carbon，见 `internal/platform/*_darwin.*`），与 Windows 平台功能对等。自动粘贴注入需要在系统设置的"隐私与安全性 > 辅助功能"里手动授权一次。详见 `progress.md`。
+macOS 上（需先装 Xcode Command Line Tools）：
+
+```bash
+CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64 -clean
+build/darwin/package-dmg.sh   # 产物 .app 打成 DMG，默认输出 build/bin/SailBoard-1.0.0-arm64.dmg
+```
+
+自动粘贴注入在 macOS 上需要在"系统设置 > 隐私与安全性 > 辅助功能"里手动授权一次（首次触发时应用会自动弹出对应的系统设置面板）。架构与实现细节见 `CLAUDE.md`。
 
 ---
 
@@ -93,7 +83,6 @@ internal/storage/                SQLite migration、仓储、设置与清理
 internal/platform/               跨平台原生能力接口，Windows / macOS 双平台完整原生实现
 internal/webpreview/             URL 标题与 favicon 抓取
 frontend/src/                   React 底部卡片栏与设置界面
-SailBoard_DESIGN.md             完整产品与架构设计
 ```
 
 Wails API 已隔离 UI、剪贴板服务、SQLite 仓储层与 `internal/platform` 原生能力层，并含单元测试。
