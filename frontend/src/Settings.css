@@ -1,0 +1,93 @@
+:root {
+  color-scheme: light;
+  --ink: #1c1c1e;
+  --ink-soft: #6b7280;
+  --accent: #007aff;
+  --hairline: rgba(60, 60, 67, .16);
+  font-family: -apple-system, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { background: #f5f5f7; margin: 0; height: 100%; overflow: hidden; }
+button, input, select { font: inherit; }
+button { color: inherit; cursor: pointer; }
+
+/* height:100% + overflow:hidden (not min-height:100vh) deliberately: the notice banner below is
+   an absolutely-positioned overlay precisely so appearing/disappearing never changes this page's
+   content height — a native OS/WebView scrollbar should never be able to appear here, regardless
+   of DPI scaling or content-length edge cases. See progress.md's window-size fix for why this
+   window's actual on-screen size can't be fully trusted to match its logical 420x560 either. */
+/* Top padding is taller than the other three sides specifically to reserve room for .notice below
+   — an absolutely-positioned overlay that would otherwise sit on top of (not push down) the first
+   row of controls. Reserved unconditionally (not just while a notice is showing) so the page's
+   content never shifts position when one appears/disappears. */
+.settings-page { position: relative; height: 100%; overflow: hidden; padding: 46px 24px 22px; display: flex; flex-direction: column; color: var(--ink); }
+.settings-page.loading { align-items: center; justify-content: center; color: var(--ink-soft); font-size: 13px; }
+
+.settings-page label { display: grid; gap: 7px; margin-bottom: 16px; color: var(--ink-soft); font-size: 13px; font-weight: 560; }
+.settings-row { display: flex; gap: 12px; }
+.settings-row label { flex: 1; min-width: 0; }
+.settings-page select, .settings-page input:not([type=checkbox]) {
+  width: 100%; padding: 9px 10px; border: 1px solid var(--hairline); border-radius: 9px;
+  background: white; color: var(--ink); outline: 0; font-size: 13.5px;
+}
+.settings-page select:focus, .settings-page input:focus { border-color: var(--accent); }
+.settings-page label.check { display: flex; flex-direction: row; align-items: center; gap: 8px; color: var(--ink); }
+
+.shortcut-capture {
+  width: 100%; padding: 9px 10px; border: 1px solid var(--hairline); border-radius: 9px;
+  background: white; color: var(--ink); outline: 0; font-size: 13.5px; text-align: left;
+  transition: border-color .12s ease, background .12s ease;
+}
+.shortcut-capture:hover { border-color: rgba(0, 122, 255, .4); }
+.shortcut-capture.capturing { border-color: var(--accent); background: rgba(0, 122, 255, .06); color: var(--accent); animation: shortcutPulse 1.1s ease-in-out infinite; }
+@keyframes shortcutPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(0, 122, 255, .18); } 50% { box-shadow: 0 0 0 4px rgba(0, 122, 255, .1); } }
+
+.cache-dir-row { display: flex; align-items: center; gap: 8px; }
+.cache-dir-path {
+  flex: 1; min-width: 0; padding: 9px 10px; border: 1px solid var(--hairline); border-radius: 9px;
+  background: rgba(120, 120, 128, .06); color: var(--ink); font-size: 12px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.storage-usage { margin-bottom: 16px; }
+.storage-usage-label { display: flex; justify-content: space-between; font-size: 12.5px; color: var(--ink-soft); font-weight: 560; margin-bottom: 6px; }
+.storage-usage-bar { height: 7px; border-radius: 4px; background: rgba(120, 120, 128, .14); overflow: hidden; }
+.storage-usage-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width .25s ease; }
+
+/* An overlay toast, not part of the flex flow (see .settings-page's comment above) — floats over
+   whatever's beneath it near the top of the page instead of ever growing the page's content
+   height; .settings-page's taller top padding reserves visual room for it instead. */
+.notice {
+  position: absolute; top: 12px; left: 16px; right: 16px; z-index: 10;
+  display: flex; align-items: flex-start; gap: 8px;
+  margin: 0; padding: 10px 10px 10px 14px; border-radius: 10px;
+  background: rgba(0, 122, 255, .94); color: white; font-size: 12.5px; font-weight: 560;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .18);
+  animation: noticeIn .18s ease;
+}
+.notice-text { flex: 1; min-width: 0; }
+.notice-close {
+  flex: none; width: 20px; height: 20px; margin-top: -1px;
+  border: 0; border-radius: 6px; background: transparent; color: white;
+  font-size: 15px; line-height: 1; opacity: .8;
+  display: flex; align-items: center; justify-content: center;
+  transition: opacity .12s ease, background .12s ease;
+}
+.notice-close:hover { opacity: 1; background: rgba(255, 255, 255, .16); }
+.notice-close:active { transform: scale(.92); }
+@keyframes noticeIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+.secondary, .primary { border: 0; border-radius: 9px; padding: 10px 16px; font-weight: 590; font-size: 13.5px; transition: transform .12s ease, filter .12s ease, opacity .12s ease; }
+.secondary:hover, .primary:hover { filter: brightness(.97); }
+.secondary:active, .primary:active { transform: scale(.97); }
+.secondary:disabled, .primary:disabled { opacity: .6; cursor: default; transform: none; }
+.primary { background: var(--accent); color: white; }
+.secondary { background: rgba(120, 120, 128, .12); color: var(--ink); }
+.secondary.small { padding: 8px 12px; font-size: 12.5px; flex: none; }
+.full-width { display: block; width: 100%; margin-bottom: 16px; text-align: center; }
+
+.footnote-link { display: block; width: 100%; margin-bottom: 16px; padding: 0; border: 0; background: none; text-align: center; color: var(--ink-soft); font-size: 12px; font-weight: 500; transition: color .12s ease; }
+.footnote-link:hover { color: var(--ink); }
+
+.actions { display: flex; gap: 12px; align-items: center; margin-top: auto; padding-top: 8px; }
+.actions button { flex: 1; }
