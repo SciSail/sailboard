@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 
 	"SailBoard/internal/platform"
@@ -148,8 +147,8 @@ func (s *SettingsApp) IsAccessibilityTrusted() bool { return platform.Accessibil
 // button can reset the form to them without the frontend needing to duplicate those values.
 func (s *SettingsApp) GetDefaultSettings() storage.Settings { return storage.DefaultSettings() }
 
-// GetCacheDir reports the on-disk directory SailBoard stores its database, cached images, and
-// cached source-app icons under (see app.go's appDataDir/diskImageStore), so the settings UI can
+// GetCacheDir reports the on-disk directory SailBoard stores its database, cached images,
+// content-addressed rich assets, and cached source-app icons under, so the settings UI can
 // display it.
 func (s *SettingsApp) GetCacheDir() (string, error) {
 	if err := s.ready(); err != nil {
@@ -175,23 +174,12 @@ func (s *SettingsApp) OpenGitHub() {
 	runtime.BrowserOpenURL(s.ctx, repositoryURL)
 }
 
-// GetStorageUsage reports the cache directory's actual on-disk footprint (database + cached
-// images/icons combined), so the settings UI can show real usage rather than just the byte_size
-// column Repository.Cleanup budgets against (which, e.g., never counts file/folder history items
-// since those store no bytes of their own — see internal/clipboard's ContentFile).
+// GetStorageUsage reports the bytes owned by history content (item payloads plus each referenced
+// image/rich asset once). It intentionally excludes the SQLite file, source-app icons, and other
+// transient cache files so the number matches the quota used by Repository.Cleanup.
 func (s *SettingsApp) GetStorageUsage() (int64, error) {
 	if err := s.ready(); err != nil {
 		return 0, err
 	}
-	var total int64
-	err := filepath.Walk(s.dataDir, func(_ string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total, err
+	return s.repository.HistoryStorageUsage(s.ctx)
 }

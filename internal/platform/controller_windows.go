@@ -73,7 +73,14 @@ func (c *windowsController) WorkAreaNearCursor() (Rect, float64, bool) {
 }
 
 func (c *windowsController) ReadClipboardImage() (data []byte, width, height int, ok bool) {
-	return readClipboardImage()
+	// Keep the legacy interface backed by the same one-session snapshot reader as
+	// the event-driven watcher. This avoids reintroducing the old CF_DIB-only path
+	// for callers that still use the individual image method.
+	snap, err := readClipboardSnapshot()
+	if err != nil {
+		return nil, 0, 0, false
+	}
+	return snap.ImagePNG, snap.ImageWidth, snap.ImageHeight, len(snap.ImagePNG) > 0
 }
 
 func (c *windowsController) WriteClipboardImage(data []byte) error {
@@ -105,6 +112,16 @@ func (c *windowsController) WriteClipboardFiles(paths []string) error {
 }
 
 func (c *windowsController) ClipboardSequence() (uint32, bool) { return clipboardSequence() }
+
+func (c *windowsController) ReadClipboardSnapshot() (ClipboardSnapshot, error) {
+	return readClipboardSnapshot()
+}
+
+func (c *windowsController) ClipboardSnapshotSupported() bool { return true }
+
+func (c *windowsController) ClipboardChanges() (<-chan struct{}, bool) {
+	return c.win.clipboardChanges, c.win.clipboardListening
+}
 
 func (c *windowsController) SetAutoLaunch(enabled bool) error {
 	return setAutoLaunch(c.appName, enabled)

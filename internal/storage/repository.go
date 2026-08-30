@@ -25,7 +25,12 @@ func Open(path string) (*Repository, error) {
 	if err != nil {
 		return nil, err
 	}
+	db.SetMaxOpenConns(1)
 	r := &Repository{db: db}
+	if _, err := db.Exec("PRAGMA foreign_keys=ON"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := r.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -58,7 +63,34 @@ func (r *Repository) migrate() error {
 	if err := r.migrateSourceIcon(); err != nil {
 		return err
 	}
-	return r.migrateRichText()
+	if err := r.migrateRichText(); err != nil {
+		return err
+	}
+	return r.migrateAssets()
+}
+
+func (r *Repository) migrateAssets() error {
+	var version int
+	if err := r.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return err
+	}
+	if version >= 4 {
+		return nil
+	}
+	_, err := r.db.Exec(`
+		PRAGMA foreign_keys=ON;
+		CREATE TABLE IF NOT EXISTS clipboard_assets (
+			hash TEXT PRIMARY KEY, path TEXT NOT NULL, mime_type TEXT NOT NULL DEFAULT '', byte_size INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE TABLE IF NOT EXISTS clipboard_item_assets (
+			item_id TEXT NOT NULL, asset_hash TEXT NOT NULL,
+			PRIMARY KEY(item_id, asset_hash),
+			FOREIGN KEY(item_id) REFERENCES clipboard_items(id) ON DELETE CASCADE,
+			FOREIGN KEY(asset_hash) REFERENCES clipboard_assets(hash) ON DELETE CASCADE
+		);
+		CREATE INDEX IF NOT EXISTS idx_clipboard_item_assets_hash ON clipboard_item_assets(asset_hash);
+		PRAGMA user_version=4;`)
+	return err
 }
 
 // migrateSourceIcon adds the source-app icon column introduced after v1. SQLite's ALTER TABLE
@@ -97,8 +129,20 @@ func (r *Repository) migrateRichText() error {
 }
 
 func (r *Repository) Upsert(ctx context.Context, item clipboard.Item) (clipboard.Item, bool, error) {
+	return r.UpsertWithAssets(ctx, item, nil)
+}
+
+func (r *Repository) UpsertWithAssets(ctx context.Context, item clipboard.Item, assets []clipboard.AssetRef) (clipboard.Item, bool, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return clipboard.Item{}, false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+		return clipboard.Item{}, false, err
+	}
 	var existing clipboard.Item
-	err := r.scanRow(r.db.QueryRowContext(ctx, selectItem+" WHERE content_hash = ?", item.Hash), &existing)
+	err = r.scanRow(tx.QueryRowContext(ctx, selectItem+" WHERE content_hash = ?", item.Hash), &existing)
 	if err == nil {
 		// Dedup is purely by content hash, which never factors in the source app — so the exact
 		// same content copied again from a *different* app (or the same app re-launched under a
@@ -109,28 +153,136 @@ func (r *Repository) Upsert(ctx context.Context, item clipboard.Item) (clipboard
 		// ActiveApp() lookup failure (see app.go's resolveSourceApp) reports an empty AppInfo, and
 		// that should never blank out a previously-known-good attribution.
 		if item.SourceApp.Name != "" {
-			_, err = r.db.ExecContext(ctx, "UPDATE clipboard_items SET last_used_at=?, source_app_name=?, source_app_identifier=?, source_icon_path=? WHERE id=?",
-				item.LastUsedAt.UnixMilli(), item.SourceApp.Name, item.SourceApp.Identifier, item.SourceApp.IconPath, existing.ID)
+			_, err = tx.ExecContext(ctx, `UPDATE clipboard_items SET content_type=?, text_content=?, file_path=?, last_used_at=?, source_app_name=?, source_app_identifier=?, source_icon_path=?, char_count=?, image_width=?, image_height=?, byte_size=?, html_content=?, rtf_content=? WHERE id=?`,
+				item.Type, item.Text, item.FilePath, item.LastUsedAt.UnixMilli(), item.SourceApp.Name, item.SourceApp.Identifier, item.SourceApp.IconPath,
+				item.CharCount, item.ImageWidth, item.ImageHeight, item.ByteSize, item.HTML, item.RTF, existing.ID)
 			existing.SourceApp = item.SourceApp
 		} else {
-			_, err = r.db.ExecContext(ctx, "UPDATE clipboard_items SET last_used_at=? WHERE id=?", item.LastUsedAt.UnixMilli(), existing.ID)
+			_, err = tx.ExecContext(ctx, `UPDATE clipboard_items SET content_type=?, text_content=?, file_path=?, last_used_at=?, char_count=?, image_width=?, image_height=?, byte_size=?, html_content=?, rtf_content=? WHERE id=?`,
+				item.Type, item.Text, item.FilePath, item.LastUsedAt.UnixMilli(), item.CharCount, item.ImageWidth, item.ImageHeight, item.ByteSize, item.HTML, item.RTF, existing.ID)
 		}
-		existing.LastUsedAt = item.LastUsedAt
+		existing.Type, existing.Text, existing.FilePath, existing.LastUsedAt, existing.CharCount = item.Type, item.Text, item.FilePath, item.LastUsedAt, item.CharCount
+		existing.ImageWidth, existing.ImageHeight, existing.ByteSize, existing.HTML, existing.RTF = item.ImageWidth, item.ImageHeight, item.ByteSize, item.HTML, item.RTF
+		if err == nil {
+			err = r.replaceAssetRefs(ctx, tx, existing.ID, assets)
+		}
+		if err == nil {
+			err = tx.Commit()
+		}
 		return existing, false, err
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return clipboard.Item{}, false, err
 	}
-	_, err = r.db.ExecContext(ctx, `INSERT INTO clipboard_items
+	_, err = tx.ExecContext(ctx, `INSERT INTO clipboard_items
 		(id,content_type,text_content,file_path,content_hash,source_app_name,source_app_identifier,source_icon_path,char_count,image_width,image_height,is_favorite,created_at,last_used_at,byte_size,html_content,rtf_content)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.Type, item.Text, item.FilePath, item.Hash, item.SourceApp.Name, item.SourceApp.Identifier, item.SourceApp.IconPath,
 		item.CharCount, item.ImageWidth, item.ImageHeight, item.Favorite, item.CreatedAt.UnixMilli(), item.LastUsedAt.UnixMilli(), item.ByteSize, item.HTML, item.RTF)
+	if err == nil {
+		err = r.replaceAssetRefs(ctx, tx, item.ID, assets)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
 	return item, true, err
+}
+
+func (r *Repository) replaceAssetRefs(ctx context.Context, tx *sql.Tx, itemID string, assets []clipboard.AssetRef) error {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM clipboard_item_assets WHERE item_id=?", itemID); err != nil {
+		return err
+	}
+	for _, a := range assets {
+		if a.Hash == "" || a.Path == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO clipboard_assets(hash,path,mime_type,byte_size) VALUES(?,?,?,?) ON CONFLICT(hash) DO UPDATE SET path=excluded.path,mime_type=excluded.mime_type,byte_size=excluded.byte_size`, a.Hash, a.Path, a.MIME, a.ByteSize); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT OR IGNORE INTO clipboard_item_assets(item_id,asset_hash) VALUES(?,?)", itemID, a.Hash); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RegisterLegacyImageAssets links image rows created before the asset table
+// migration to their existing content-addressed files.
+func (r *Repository) RegisterLegacyImageAssets(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx, `INSERT OR IGNORE INTO clipboard_assets(hash,path,mime_type,byte_size)
+		SELECT content_hash,file_path,'image/png',byte_size FROM clipboard_items WHERE content_type='image' AND file_path<>''`)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `INSERT OR IGNORE INTO clipboard_item_assets(item_id,asset_hash)
+		SELECT id,content_hash FROM clipboard_items WHERE content_type='image' AND file_path<>''`)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `UPDATE clipboard_items SET byte_size=0 WHERE content_type='image'`)
+	return err
+}
+
+func (r *Repository) ReferencedAssetPaths(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT path FROM clipboard_assets a
+		WHERE EXISTS (SELECT 1 FROM clipboard_item_assets ia WHERE ia.asset_hash=a.hash)
+		UNION SELECT DISTINCT file_path FROM clipboard_items WHERE content_type='image' AND file_path<>''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var paths []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		paths = append(paths, p)
+	}
+	return paths, rows.Err()
+}
+
+func (r *Repository) PruneUnreferencedAssets(ctx context.Context) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM clipboard_assets WHERE NOT EXISTS (SELECT 1 FROM clipboard_item_assets ia WHERE ia.asset_hash=clipboard_assets.hash)`)
+	return err
+}
+
+func (r *Repository) HistoryStorageUsage(ctx context.Context) (int64, error) {
+	var payload, assets int64
+	if err := r.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(byte_size),0) FROM clipboard_items").Scan(&payload); err != nil {
+		return 0, err
+	}
+	if err := r.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(a.byte_size),0) FROM clipboard_assets a
+		WHERE EXISTS (SELECT 1 FROM clipboard_item_assets ia WHERE ia.asset_hash=a.hash)`).Scan(&assets); err != nil {
+		return 0, err
+	}
+	return payload + assets, nil
+}
+
+func (r *Repository) AssetsForItem(ctx context.Context, itemID string) ([]clipboard.AssetRef, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT a.hash,a.path,a.mime_type,a.byte_size FROM clipboard_assets a
+		JOIN clipboard_item_assets ia ON ia.asset_hash=a.hash WHERE ia.item_id=?`, itemID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []clipboard.AssetRef
+	for rows.Next() {
+		var a clipboard.AssetRef
+		if err := rows.Scan(&a.Hash, &a.Path, &a.MIME, &a.ByteSize); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 const selectItem = `SELECT id,content_type,COALESCE(text_content,''),COALESCE(file_path,''),content_hash,
 	COALESCE(source_app_name,''),COALESCE(source_app_identifier,''),COALESCE(source_icon_path,''),char_count,image_width,image_height,is_favorite,created_at,last_used_at,byte_size,
 	COALESCE(html_content,''),COALESCE(rtf_content,'') FROM clipboard_items`
+
+const selectItemSummary = `SELECT id,content_type,COALESCE(text_content,''),COALESCE(file_path,''),content_hash,
+	COALESCE(source_app_name,''),COALESCE(source_app_identifier,''),COALESCE(source_icon_path,''),char_count,image_width,image_height,is_favorite,created_at,last_used_at,byte_size,
+	'', '' FROM clipboard_items`
 
 func (r *Repository) scanRow(row *sql.Row, item *clipboard.Item) error {
 	var favorite int
@@ -147,13 +299,13 @@ func (r *Repository) List(ctx context.Context, limit, offset int, favoritesOnly 
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	query := selectItem + " WHERE (? = 0 OR is_favorite=1) ORDER BY last_used_at DESC LIMIT ? OFFSET ?"
+	query := selectItemSummary + " WHERE (? = 0 OR is_favorite=1) ORDER BY last_used_at DESC LIMIT ? OFFSET ?"
 	return r.query(ctx, query, boolInt(favoritesOnly), limit, offset)
 }
 
 func (r *Repository) Search(ctx context.Context, value string, favoritesOnly bool) ([]clipboard.Item, error) {
 	needle := "%" + value + "%"
-	query := selectItem + ` WHERE (? = 0 OR is_favorite=1) AND (text_content LIKE ? COLLATE NOCASE OR source_app_name LIKE ? COLLATE NOCASE) ORDER BY last_used_at DESC LIMIT 100`
+	query := selectItemSummary + ` WHERE (? = 0 OR is_favorite=1) AND (text_content LIKE ? COLLATE NOCASE OR source_app_name LIKE ? COLLATE NOCASE) ORDER BY last_used_at DESC LIMIT 100`
 	return r.query(ctx, query, boolInt(favoritesOnly), needle, needle)
 }
 
@@ -213,15 +365,15 @@ func (r *Repository) Cleanup(ctx context.Context, policy Settings) error {
 	}
 	if policy.MaxStorageBytes > 0 {
 		for {
-			var total int64
-			if err := r.db.QueryRowContext(ctx, "SELECT COALESCE(SUM(byte_size),0) FROM clipboard_items").Scan(&total); err != nil {
+			total, err := r.HistoryStorageUsage(ctx)
+			if err != nil {
 				return err
 			}
 			if total <= policy.MaxStorageBytes {
 				break
 			}
 			var id string
-			err := r.db.QueryRowContext(ctx, "SELECT id FROM clipboard_items WHERE is_favorite=0 ORDER BY last_used_at ASC LIMIT 1").Scan(&id)
+			err = r.db.QueryRowContext(ctx, "SELECT id FROM clipboard_items WHERE is_favorite=0 ORDER BY last_used_at ASC LIMIT 1").Scan(&id)
 			if errors.Is(err, sql.ErrNoRows) {
 				break
 			}

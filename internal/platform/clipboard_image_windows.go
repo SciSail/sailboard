@@ -4,8 +4,10 @@ package platform
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/png"
 	"unsafe"
@@ -19,119 +21,204 @@ func clipboardSequence() (uint32, bool) {
 	return uint32(seq), true
 }
 
-// readClipboardImage reads CF_DIB (device-independent bitmap) from the clipboard, if present,
-// and re-encodes it as PNG. Only 24bpp and 32bpp uncompressed DIBs are supported, which covers
-// what browsers, Paint, Snipping Tool and Office produce; anything else is reported as absent
-// rather than failing capture outright.
+// readClipboardImage is the legacy single-image entry point. Keep it backed by
+// the same one-session snapshot reader used by the event-driven watcher so old
+// callers also get PNG/CF_DIBV5/CF_DIB support and the same lock-minimised path.
 func readClipboardImage() (data []byte, width, height int, ok bool) {
-	if avail, _, _ := procIsClipboardFormatAvl.Call(cfDIB); avail == 0 {
-		return nil, 0, 0, false
-	}
-	if opened, _, _ := procOpenClipboard.Call(0); opened == 0 {
-		return nil, 0, 0, false
-	}
-
-	hMem, _, _ := procGetClipboardData.Call(cfDIB)
-	if hMem == 0 {
-		procCloseClipboard.Call()
-		return nil, 0, 0, false
-	}
-	size, _, _ := procGlobalSize.Call(hMem)
-	if size < unsafe.Sizeof(bitmapInfoHeader{}) {
-		procCloseClipboard.Call()
-		return nil, 0, 0, false
-	}
-	ptr, _, _ := procGlobalLock.Call(hMem)
-	if ptr == 0 {
-		procCloseClipboard.Call()
-		return nil, 0, 0, false
-	}
-
-	// ptr is a raw Win32 global-memory address (from GlobalLock), not a Go-managed pointer, so
-	// go vet's unsafeptr heuristic flags this as a possible misuse; it is the standard pattern
-	// for reading foreign memory returned by a syscall.
-	raw := unsafe.Slice((*byte)(unsafe.Pointer(ptr)), int(size))
-	buf := make([]byte, len(raw))
-	copy(buf, raw) // copy out before unlocking / releasing the clipboard
-	procGlobalUnlock.Call(hMem)
-	procCloseClipboard.Call()
-
-	// Decode/encode run after the clipboard is released: OpenClipboard blocks every other
-	// process's clipboard access (including Explorer writing a CF_HDROP for a file copy)
-	// system-wide until CloseClipboard, so nothing beyond the raw memory copy above may run
-	// while it's held.
-	img, err := decodeDIB(buf)
+	snap, err := readClipboardSnapshot()
 	if err != nil {
 		return nil, 0, 0, false
 	}
-	var out bytes.Buffer
-	if err := png.Encode(&out, img); err != nil {
-		return nil, 0, 0, false
-	}
-	b := img.Bounds()
-	return out.Bytes(), b.Dx(), b.Dy(), true
+	return snap.ImagePNG, snap.ImageWidth, snap.ImageHeight, len(snap.ImagePNG) > 0
 }
 
 func decodeDIB(buf []byte) (image.Image, error) {
-	if len(buf) < int(unsafe.Sizeof(bitmapInfoHeader{})) {
+	if len(buf) < 40 {
 		return nil, errIconUnavailable
 	}
-	hdr := (*bitmapInfoHeader)(unsafe.Pointer(&buf[0]))
-	width := int(hdr.Width)
-	height := int(hdr.Height)
-	topDown := height < 0
+	hdrSize := int(binary.LittleEndian.Uint32(buf[0:4]))
+	if hdrSize < 40 || hdrSize > len(buf) {
+		return nil, errIconUnavailable
+	}
+	width := int(int32(binary.LittleEndian.Uint32(buf[4:8])))
+	heightRaw := int(int32(binary.LittleEndian.Uint32(buf[8:12])))
+	if width <= 0 || heightRaw == 0 || width > 65535 || heightRaw == -2147483648 {
+		return nil, errIconUnavailable
+	}
+	topDown := heightRaw < 0
+	height := heightRaw
 	if topDown {
 		height = -height
 	}
-	if width <= 0 || height <= 0 {
+	if height > 65535 || width*height > 64*1024*1024 {
+		return nil, errIconUnavailable
+	}
+	planes := binary.LittleEndian.Uint16(buf[12:14])
+	bpp := int(binary.LittleEndian.Uint16(buf[14:16]))
+	compression := binary.LittleEndian.Uint32(buf[16:20])
+	clrUsed := int(binary.LittleEndian.Uint32(buf[32:36]))
+	if planes != 0 && planes != 1 {
+		return nil, errIconUnavailable
+	}
+	switch bpp {
+	case 1, 4, 8, 16, 24, 32:
+	default:
+		return nil, errIconUnavailable
+	}
+	if compression != biRGB && compression != biBitfields && compression != 6 {
 		return nil, errIconUnavailable
 	}
 
-	headerSize := int(hdr.Size)
-	paletteBytes := 0
-	if hdr.BitCount <= 8 {
-		colors := int(hdr.ClrUsed)
-		if colors == 0 {
-			colors = 1 << hdr.BitCount
+	var rMask, gMask, bMask, aMask uint32
+	maskExtra := 0
+	if compression == biBitfields || compression == 6 {
+		if hdrSize == 40 {
+			if len(buf) < 52 {
+				return nil, errIconUnavailable
+			}
+			rMask = binary.LittleEndian.Uint32(buf[40:44])
+			gMask = binary.LittleEndian.Uint32(buf[44:48])
+			bMask = binary.LittleEndian.Uint32(buf[48:52])
+			maskExtra = 12
+			if compression == 6 && len(buf) >= 56 {
+				aMask = binary.LittleEndian.Uint32(buf[52:56])
+				maskExtra = 16
+			}
+		} else {
+			if hdrSize < 56 {
+				return nil, errIconUnavailable
+			}
+			rMask = binary.LittleEndian.Uint32(buf[40:44])
+			gMask = binary.LittleEndian.Uint32(buf[44:48])
+			bMask = binary.LittleEndian.Uint32(buf[48:52])
+			aMask = binary.LittleEndian.Uint32(buf[52:56])
 		}
-		paletteBytes = colors * 4
+	} else if hdrSize >= 108 && len(buf) >= 56 {
+		aMask = binary.LittleEndian.Uint32(buf[52:56])
 	}
-	pixelOffset := headerSize + paletteBytes
-	bytesPerPixel := int(hdr.BitCount) / 8
-	if bytesPerPixel != 3 && bytesPerPixel != 4 {
-		return nil, errIconUnavailable
+	if bpp == 16 && rMask == 0 {
+		rMask, gMask, bMask = 0x7C00, 0x03E0, 0x001F
 	}
-	rowSize := ((width*int(hdr.BitCount) + 31) / 32) * 4
-	needed := pixelOffset + rowSize*height
-	if len(buf) < needed {
+	paletteEntries := 0
+	if bpp <= 8 {
+		paletteEntries = clrUsed
+		if paletteEntries == 0 {
+			paletteEntries = 1 << bpp
+		}
+		if paletteEntries > 256 {
+			return nil, errIconUnavailable
+		}
+	}
+	pixelOffset := hdrSize + maskExtra + paletteEntries*4
+	stride := ((width*bpp + 31) / 32) * 4
+	if pixelOffset < 0 || stride <= 0 || height > (len(buf)-pixelOffset)/stride {
 		return nil, errIconUnavailable
 	}
 
-	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	palette := make([]color.NRGBA, paletteEntries)
+	for i := range palette {
+		off := hdrSize + maskExtra + i*4
+		// RGBQUAD's fourth byte is reserved for the classic palette
+		// formats (it is normally zero), not an alpha channel. Treating
+		// it as alpha would make ordinary 1/4/8bpp clipboard images fully
+		// transparent.
+		palette[i] = color.NRGBA{R: buf[off+2], G: buf[off+1], B: buf[off], A: 255}
+	}
+	alphaAsAlpha := false
+	if bpp == 32 {
+		if aMask != 0 || compression == 6 {
+			alphaAsAlpha = true
+		} else if compression == biRGB {
+			allZero := true
+			for y := 0; y < height && allZero; y++ {
+				row := buf[pixelOffset+y*stride:]
+				for x := 0; x < width; x++ {
+					if row[x*4+3] != 0 {
+						allZero = false
+						break
+					}
+				}
+			}
+			alphaAsAlpha = !allZero
+		}
+	}
+	img := image.NewNRGBA(image.Rect(0, 0, width, height))
 	for y := 0; y < height; y++ {
 		srcRow := y
 		if !topDown {
 			srcRow = height - 1 - y
 		}
-		rowStart := pixelOffset + srcRow*rowSize
+		row := buf[pixelOffset+srcRow*stride:]
 		for x := 0; x < width; x++ {
-			si := rowStart + x*bytesPerPixel
-			b, g, r := buf[si], buf[si+1], buf[si+2]
-			a := byte(255)
-			if bytesPerPixel == 4 {
-				a = buf[si+3]
-				if a == 0 {
-					a = 255 // most 32bpp clipboard DIBs leave alpha unset; treat as opaque
+			var c color.NRGBA
+			switch bpp {
+			case 32:
+				v := binary.LittleEndian.Uint32(row[x*4 : x*4+4])
+				if rMask != 0 || gMask != 0 || bMask != 0 {
+					c = color.NRGBA{R: maskTo8(v, rMask), G: maskTo8(v, gMask), B: maskTo8(v, bMask), A: 255}
+					if aMask != 0 {
+						c.A = maskTo8(v, aMask)
+					}
+				} else {
+					c = color.NRGBA{R: row[x*4+2], G: row[x*4+1], B: row[x*4], A: 255}
+					if alphaAsAlpha {
+						c.A = row[x*4+3]
+					}
+				}
+			case 24:
+				o := x * 3
+				c = color.NRGBA{R: row[o+2], G: row[o+1], B: row[o], A: 255}
+			case 16:
+				v := uint32(binary.LittleEndian.Uint16(row[x*2 : x*2+2]))
+				c = color.NRGBA{R: maskTo8(v, rMask), G: maskTo8(v, gMask), B: maskTo8(v, bMask), A: 255}
+			case 8:
+				if x < width && int(row[x]) < len(palette) {
+					c = palette[row[x]]
+				}
+			case 4:
+				b := row[x/2]
+				n := b >> 4
+				if x%2 == 1 {
+					n = b & 0xF
+				}
+				if int(n) < len(palette) {
+					c = palette[n]
+				}
+			case 1:
+				n := (row[x/8] >> (7 - uint(x%8))) & 1
+				if int(n) < len(palette) {
+					c = palette[n]
 				}
 			}
-			di := img.PixOffset(x, y)
-			img.Pix[di+0] = r
-			img.Pix[di+1] = g
-			img.Pix[di+2] = b
-			img.Pix[di+3] = a
+			o := img.PixOffset(x, y)
+			img.Pix[o], img.Pix[o+1], img.Pix[o+2], img.Pix[o+3] = c.R, c.G, c.B, c.A
 		}
 	}
 	return img, nil
+}
+
+func maskTo8(v, mask uint32) byte {
+	if mask == 0 {
+		return 0
+	}
+	shift := uint(0)
+	for mask&1 == 0 {
+		mask >>= 1
+		shift++
+	}
+	bits := uint(0)
+	for mask&1 == 1 {
+		mask >>= 1
+		bits++
+	}
+	if bits == 0 {
+		return 0
+	}
+	val := (v >> shift) & ((uint32(1) << bits) - 1)
+	if bits >= 8 {
+		return byte(val >> (bits - 8))
+	}
+	return byte(val * 255 / ((uint32(1) << bits) - 1))
 }
 
 // writeClipboardImage decodes a PNG and writes it back to the system clipboard in two formats, so

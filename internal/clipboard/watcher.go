@@ -2,13 +2,21 @@ package clipboard
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
-// Watcher polls the system clipboard for changes and reports them as RawContent. It keeps every
-// OS-specific clipboard API out of this package: all reads are injected as plain functions, so
-// the same Watcher drives both the native Windows controller and any future platform.
+// Watcher observes clipboard changes and reports them as RawContent. On Windows
+// Changes is fed by WM_CLIPBOARDUPDATE; platforms without a native notification
+// use the interval ticker. Reads are always injected so this package contains no
+// OS-specific clipboard code.
 type Watcher struct {
+	// ReadSnapshot is the preferred reader. It must return only after all native
+	// clipboard locks have been released. A read error is retried with backoff.
+	ReadSnapshot func() (RawContent, error)
+	// Changes is a non-blocking notification channel. Notifications contain no
+	// data; the reader must fetch the latest snapshot.
+	Changes <-chan struct{}
 	// ReadText returns the current clipboard text (Wails' runtime.ClipboardGetText works here
 	// on every platform Wails supports).
 	ReadText func() (string, error)
@@ -41,53 +49,142 @@ func (w Watcher) Start(ctx context.Context, onChange func(RawContent)) {
 	if interval == 0 {
 		interval = 250 * time.Millisecond
 	}
-	ticker := time.NewTicker(interval)
+	// A Windows listener is authoritative, but keep a slow safety poll in case a
+	// listener registration is lost. On polling-only platforms this is the normal
+	// cadence.
+	pollInterval := interval
+	if w.Changes != nil && pollInterval < 2*time.Second {
+		pollInterval = 2 * time.Second
+	}
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	lastText := ""
 	var lastSeq uint32
 	haveSeq := false
+	var timer *time.Timer
+	var timerC <-chan time.Time
+	pending := true // capture the current clipboard once at startup
+	const debounce = 40 * time.Millisecond
+	retryDelay := 25 * time.Millisecond
+	const maxRetryDelay = time.Second
+
+	read := w.ReadSnapshot
+	if read == nil {
+		read = func() (RawContent, error) {
+			if w.ReadFiles != nil {
+				if paths, ok := w.ReadFiles(); ok {
+					return RawContent{FilePaths: paths}, nil
+				}
+			}
+			if w.ReadRichText != nil {
+				if html, rtf, text, ok := w.ReadRichText(); ok {
+					return RawContent{HTML: html, RTF: rtf, Text: text}, nil
+				}
+			}
+			if w.ReadImage != nil {
+				if data, width, height, ok := w.ReadImage(); ok {
+					return RawContent{ImageBytes: data, ImageWidth: width, ImageHeight: height}, nil
+				}
+			}
+			if w.ReadText == nil {
+				return RawContent{}, fmt.Errorf("clipboard reader is not configured")
+			}
+			text, err := w.ReadText()
+			if err != nil {
+				return RawContent{}, err
+			}
+			if text == "" || text == lastText {
+				return RawContent{}, nil
+			}
+			lastText = text
+			return RawContent{Text: text}, nil
+		}
+	}
+	changes := w.Changes
+	schedule := func(delay time.Duration) {
+		if timer == nil {
+			timer = time.NewTimer(delay)
+		} else {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(delay)
+		}
+		timerC = timer.C
+	}
+	schedule(0)
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case _, ok := <-changes:
+			if !ok {
+				// A host may tear down its notification source before the
+				// watcher context is cancelled. Disable that select arm and
+				// keep the safety poll alive instead of spinning on a closed
+				// channel forever.
+				changes = nil
+				continue
+			}
+			pending = true
+			schedule(debounce)
 		case <-ticker.C:
+			pending = true
+			schedule(0)
+		case <-timerC:
+			timerC = nil
+			if !pending {
+				continue
+			}
 			if w.IsPaused != nil && w.IsPaused() {
+				schedule(interval)
 				continue
 			}
+			var seq uint32
+			var seqOK bool
 			if w.Sequence != nil {
-				if seq, ok := w.Sequence(); ok {
-					if haveSeq && seq == lastSeq {
-						continue
-					}
-					haveSeq, lastSeq = true, seq
-				}
+				seq, seqOK = w.Sequence()
 			}
-			if w.ReadFiles != nil {
-				if paths, ok := w.ReadFiles(); ok {
-					onChange(RawContent{FilePaths: paths})
-					continue
-				}
-			}
-			if w.ReadRichText != nil {
-				if html, rtf, text, ok := w.ReadRichText(); ok {
-					onChange(RawContent{HTML: html, RTF: rtf, Text: text})
-					continue
-				}
-			}
-			if w.ReadImage != nil {
-				if data, width, height, ok := w.ReadImage(); ok {
-					onChange(RawContent{ImageBytes: data, ImageWidth: width, ImageHeight: height})
-					continue
-				}
-			}
-			text, err := w.ReadText()
-			if err != nil || text == "" || text == lastText {
+			if seqOK && haveSeq && seq == lastSeq {
+				pending = false
+				retryDelay = 25 * time.Millisecond
 				continue
 			}
-			lastText = text
-			onChange(RawContent{Text: text})
+			raw, err := read()
+			if err != nil {
+				// Do not consume the sequence on failure. OpenClipboard
+				// contention is transient and the next attempt must retry it.
+				schedule(retryDelay)
+				if retryDelay < maxRetryDelay {
+					retryDelay *= 2
+					if retryDelay > maxRetryDelay {
+						retryDelay = maxRetryDelay
+					}
+				}
+				continue
+			}
+			if seqOK {
+				haveSeq, lastSeq = true, seq
+			}
+			pending = false
+			retryDelay = 25 * time.Millisecond
+			if hasContent(raw) {
+				onChange(raw)
+			}
 		}
 	}
+}
+
+func hasContent(raw RawContent) bool {
+	return raw.Text != "" || raw.HTML != "" || raw.RTF != "" || len(raw.FilePaths) > 0 || len(raw.ImageBytes) > 0
 }

@@ -16,7 +16,7 @@ APP="$REPO_ROOT/build/bin/SailBoard.app"
 VOLNAME="SailBoard"
 STAGING="$REPO_ROOT/build/dmg-staging"
 RW_DMG="$REPO_ROOT/build/bin/SailBoard-rw.dmg"
-FINAL_DMG="${1:-$REPO_ROOT/build/bin/SailBoard-1.0.0-arm64.dmg}"
+FINAL_DMG="${1:-$REPO_ROOT/build/bin/SailBoard-1.1.0-arm64.dmg}"
 MOUNT_POINT="/Volumes/$VOLNAME"
 
 if [ ! -d "$APP" ]; then

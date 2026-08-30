@@ -5,6 +5,7 @@ package platform
 import (
 	"bytes"
 	"encoding/binary"
+	"image"
 	"image/color"
 	"testing"
 )
@@ -78,6 +79,45 @@ func TestDecodeDIBTopDown(t *testing.T) {
 	assertPixel(t, img, 1, 0, green)
 	assertPixel(t, img, 0, 1, blue)
 	assertPixel(t, img, 1, 1, white)
+}
+
+func TestDecodeDIBPaletteIsOpaque(t *testing.T) {
+	// A classic 2x1 8bpp DIB stores palette entries as B,G,R,0 RGBQUADs. The
+	// reserved zero byte must not be interpreted as an alpha channel.
+	hdr := bitmapInfoHeader{Size: 40, Width: 2, Height: 1, Planes: 1, BitCount: 8, Compression: biRGB, ClrUsed: 2}
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, hdr); err != nil {
+		t.Fatal(err)
+	}
+	buf.Write([]byte{255, 0, 0, 0, 0, 0, 255, 0}) // blue, red
+	buf.Write([]byte{0, 1, 0, 0})                 // pixels + row padding
+	img, err := decodeDIB(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decodeDIB() error = %v", err)
+	}
+	assertPixel(t, img, 0, 0, rgb{0, 0, 255})
+	assertPixel(t, img, 1, 0, rgb{255, 0, 0})
+}
+
+func TestDecodeDIB32BitAlpha(t *testing.T) {
+	hdr := bitmapInfoHeader{Size: 40, Width: 1, Height: -1, Planes: 1, BitCount: 32, Compression: biRGB}
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, hdr); err != nil {
+		t.Fatal(err)
+	}
+	buf.Write([]byte{0, 255, 0, 128}) // BGRA: straight green at 50% alpha
+	img, err := decodeDIB(buf.Bytes())
+	if err != nil {
+		t.Fatalf("decodeDIB() error = %v", err)
+	}
+	pixel, ok := img.(*image.NRGBA)
+	if !ok {
+		t.Fatalf("decodeDIB() type = %T, want *image.NRGBA", img)
+	}
+	got := pixel.NRGBAAt(0, 0)
+	if got != (color.NRGBA{R: 0, G: 255, B: 0, A: 128}) {
+		t.Fatalf("pixel = %+v, want straight RGBA %+v", got, color.NRGBA{R: 0, G: 255, B: 0, A: 128})
+	}
 }
 
 func assertPixel(t *testing.T, img interface {

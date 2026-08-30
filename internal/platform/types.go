@@ -130,6 +130,16 @@ type Controller interface {
 	// ReadClipboardImage returns the current clipboard image re-encoded as PNG, if present.
 	ReadClipboardImage() (data []byte, width, height int, ok bool)
 
+	// ReadClipboardSnapshot copies one consistent native clipboard snapshot. The
+	// implementation must release any native clipboard lock before returning.
+	ReadClipboardSnapshot() (ClipboardSnapshot, error)
+	ClipboardSnapshotSupported() bool
+
+	// ClipboardChanges returns a non-blocking notification channel when the host
+	// can deliver clipboard-change events. The channel carries no payload; callers
+	// read a fresh snapshot after receiving a notification.
+	ClipboardChanges() (<-chan struct{}, bool)
+
 	// WriteClipboardImage writes a PNG-encoded image back to the system clipboard as a native
 	// image format, so a pasted history item behaves like a fresh copy.
 	WriteClipboardImage(data []byte) error

@@ -214,7 +214,7 @@ export default function Settings() {
 
     <div className="storage-usage">
       <div className="storage-usage-label">
-        <span>缓存空间占用</span>
+        <span>历史内容占用</span>
         <span>{usageBytes === null ? "计算中…" : settings.maxStorageBytes > 0 ? `${formatBytes(usageBytes)} / ${formatBytes(settings.maxStorageBytes)}` : formatBytes(usageBytes)}</span>
       </div>
       {usageBytes !== null && settings.maxStorageBytes > 0 && <div className="storage-usage-bar">

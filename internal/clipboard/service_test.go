@@ -20,6 +20,12 @@ func newFakeRepository() *fakeRepository {
 func (r *fakeRepository) Upsert(_ context.Context, item Item) (Item, bool, error) {
 	if existing, ok := r.byHash[item.Hash]; ok {
 		existing.LastUsedAt = item.LastUsedAt
+		existing.Type, existing.Text, existing.FilePath = item.Type, item.Text, item.FilePath
+		existing.CharCount, existing.ImageWidth, existing.ImageHeight = item.CharCount, item.ImageWidth, item.ImageHeight
+		existing.ByteSize, existing.HTML, existing.RTF = item.ByteSize, item.HTML, item.RTF
+		if item.SourceApp.Name != "" {
+			existing.SourceApp = item.SourceApp
+		}
 		r.byHash[item.Hash] = existing
 		r.byID[existing.ID] = existing
 		return existing, false, nil

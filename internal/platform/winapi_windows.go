@@ -49,6 +49,8 @@ var (
 	procGetClipboardData         = user32.NewProc("GetClipboardData")
 	procIsClipboardFormatAvl     = user32.NewProc("IsClipboardFormatAvailable")
 	procGetClipboardSeqNum       = user32.NewProc("GetClipboardSequenceNumber")
+	procAddClipboardListener     = user32.NewProc("AddClipboardFormatListener")
+	procRemoveClipboardListener  = user32.NewProc("RemoveClipboardFormatListener")
 	procEmptyClipboard           = user32.NewProc("EmptyClipboard")
 	procSetClipboardData         = user32.NewProc("SetClipboardData")
 	procRegisterClipboardFormat  = user32.NewProc("RegisterClipboardFormatW")
@@ -127,15 +129,16 @@ type msg struct {
 }
 
 const (
-	wmDestroy       = 0x0002
-	wmHotkey        = 0x0312
-	wmCommand       = 0x0111
-	wmApp           = 0x8000
-	wmLButtonUp     = 0x0202
-	wmLButtonDblClk = 0x0203
-	wmRButtonUp     = 0x0205
-	wmClose         = 0x0010
-	wmQuit          = 0x0012
+	wmDestroy         = 0x0002
+	wmHotkey          = 0x0312
+	wmClipboardUpdate = 0x031D
+	wmCommand         = 0x0111
+	wmApp             = 0x8000
+	wmLButtonUp       = 0x0202
+	wmLButtonDblClk   = 0x0203
+	wmRButtonUp       = 0x0205
+	wmClose           = 0x0010
+	wmQuit            = 0x0012
 
 	trayCallbackMsg   = wmApp + 1
 	wmExecute         = wmApp + 2

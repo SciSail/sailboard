@@ -29,10 +29,12 @@ type msgWindow struct {
 
 	tray *trayState
 
-	onSettingsChanged func()
-	onShowRequested   func()
-	onHotkeySuspend   func()
-	onHotkeyResume    func()
+	onSettingsChanged  func()
+	onShowRequested    func()
+	onHotkeySuspend    func()
+	onHotkeyResume     func()
+	clipboardChanges   chan struct{}
+	clipboardListening bool
 
 	jobsMu sync.Mutex
 	jobs   []func()
@@ -45,7 +47,7 @@ var wndProcCallback = syscall.NewCallback(wndProcDispatch)
 var activeWindows sync.Map // hwnd(uintptr) -> *msgWindow
 
 func newMsgWindow() (*msgWindow, error) {
-	w := &msgWindow{hotkeys: make(map[int32]func()), readyErr: make(chan error, 1)}
+	w := &msgWindow{hotkeys: make(map[int32]func()), readyErr: make(chan error, 1), clipboardChanges: make(chan struct{}, 1)}
 	go w.run()
 	if err := <-w.readyErr; err != nil {
 		return nil, err
@@ -86,6 +88,9 @@ func (w *msgWindow) run() {
 	}
 	w.hwnd = hwnd
 	activeWindows.Store(hwnd, w)
+	if result, _, _ := procAddClipboardListener.Call(hwnd); result != 0 {
+		w.clipboardListening = true
+	}
 	w.readyErr <- nil
 
 	var m msg
@@ -113,6 +118,12 @@ func wndProcDispatch(hwnd, message, wParam, lParam uintptr) uintptr {
 
 func (w *msgWindow) handle(message uint32, wParam, lParam uintptr) (bool, uintptr) {
 	switch message {
+	case wmClipboardUpdate:
+		select {
+		case w.clipboardChanges <- struct{}{}:
+		default:
+		}
+		return true, 0
 	case wmHotkey:
 		w.mu.Lock()
 		handler := w.hotkeys[int32(wParam)]
@@ -211,7 +222,13 @@ func (w *msgWindow) close() {
 	// DestroyWindow, like RegisterHotKey, must be called from the thread that created the
 	// window — it is silently ignored (or fails) otherwise, so it goes through the same
 	// message-loop job queue as registerHotkey rather than calling it directly here.
-	w.runSync(func() { procDestroyWindow.Call(w.hwnd) })
+	w.runSync(func() {
+		if w.clipboardListening {
+			procRemoveClipboardListener.Call(w.hwnd)
+			w.clipboardListening = false
+		}
+		procDestroyWindow.Call(w.hwnd)
+	})
 }
 
 // runSync marshals fn onto the message loop's own OS thread and blocks until it has run.

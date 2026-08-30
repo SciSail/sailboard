@@ -39,6 +39,11 @@ func (stubController) WorkAreaNearCursor() (Rect, float64, bool)         { retur
 func (stubController) ReadClipboardImage() ([]byte, int, int, bool) {
 	return nil, 0, 0, false
 }
+func (stubController) ReadClipboardSnapshot() (ClipboardSnapshot, error) {
+	return ClipboardSnapshot{}, fmt.Errorf("clipboard snapshot support is not implemented on this platform")
+}
+func (stubController) ClipboardSnapshotSupported() bool          { return false }
+func (stubController) ClipboardChanges() (<-chan struct{}, bool) { return nil, false }
 func (stubController) WriteClipboardImage([]byte) error {
 	return fmt.Errorf("image clipboard support is not implemented on this platform")
 }

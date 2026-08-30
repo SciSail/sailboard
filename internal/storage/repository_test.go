@@ -138,6 +138,43 @@ func TestUpsertPersistsRichTextPayload(t *testing.T) {
 	}
 }
 
+func TestUpsertWithAssetsReplacesRichPayloadAndCountsUniqueAssets(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "assets.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ctx := context.Background()
+	now := time.Now()
+	item := clipboard.Item{ID: "a", Type: clipboard.ContentText, Text: "same", Hash: clipboard.HashText("same"), HTML: "<b>old</b>", ByteSize: int64(len("same") + len("<b>old</b>")), CreatedAt: now, LastUsedAt: now}
+	asset1 := clipboard.AssetRef{Hash: "asset-one", Path: filepath.Join(t.TempDir(), "one.png"), MIME: "image/png", ByteSize: 10}
+	if _, _, err := r.UpsertWithAssets(ctx, item, []clipboard.AssetRef{asset1}); err != nil {
+		t.Fatal(err)
+	}
+	usage, err := r.HistoryStorageUsage(ctx)
+	if err != nil || usage != item.ByteSize+10 {
+		t.Fatalf("usage=%d err=%v", usage, err)
+	}
+	item.HTML = "<i>new</i>"
+	item.ByteSize = int64(len(item.Text) + len(item.HTML))
+	asset2 := clipboard.AssetRef{Hash: "asset-two", Path: filepath.Join(t.TempDir(), "two.png"), MIME: "image/png", ByteSize: 20}
+	got, created, err := r.UpsertWithAssets(ctx, item, []clipboard.AssetRef{asset2})
+	if err != nil || created || got.HTML != item.HTML {
+		t.Fatalf("got=%+v created=%v err=%v", got, created, err)
+	}
+	usage, err = r.HistoryStorageUsage(ctx)
+	if err != nil || usage != item.ByteSize+20 {
+		t.Fatalf("updated usage=%d err=%v", usage, err)
+	}
+	if err := r.Delete(ctx, "a"); err != nil {
+		t.Fatal(err)
+	}
+	usage, err = r.HistoryStorageUsage(ctx)
+	if err != nil || usage != 0 {
+		t.Fatalf("usage after delete=%d err=%v", usage, err)
+	}
+}
+
 // TestMigrateIsIdempotentAcrossReopen guards against a real regression: migrate() used to reset
 // PRAGMA user_version=1 unconditionally on every startup, which erased the version a later
 // migration (migrateSourceIcon) had bumped it to, causing that migration's ALTER TABLE ADD

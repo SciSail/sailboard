@@ -40,6 +40,16 @@ type Item struct {
 	RTF  string
 }
 
+// AssetRef is a content-addressed local payload referenced by an item. The
+// source URL is kept inside the rich-text placeholder, while the database uses
+// Hash to maintain a many-to-many reference and quota accounting.
+type AssetRef struct {
+	Hash     string
+	Path     string
+	MIME     string
+	ByteSize int64
+}
+
 type RawContent struct {
 	Text        string
 	ImageBytes  []byte

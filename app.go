@@ -65,7 +65,9 @@ type App struct {
 	// animMu serializes ShowWindow's and HideWindowAnimated's native AnimateWindow calls against
 	// each other, so a rapid re-summon or dismiss can never run two of them concurrently on the
 	// same HWND — see ShowWindow's doc comment.
-	animMu sync.Mutex
+	animMu  sync.Mutex
+	assetMu sync.Mutex
+	assets  *diskAssetStore
 }
 
 // NewApp creates a new App application struct
@@ -91,6 +93,12 @@ func (a *App) startup(ctx context.Context) {
 	a.repository = repository
 	images := &diskImageStore{dir: filepath.Join(dataDir, "images")}
 	a.clipboard = clipboard.NewService(repository, images)
+	a.assets = &diskAssetStore{imagesDir: images.dir, richDir: filepath.Join(dataDir, "assets")}
+	a.clipboard.SetAssetStore(a.assets)
+	if err := repository.RegisterLegacyImageAssets(ctx); err != nil {
+		runtime.LogErrorf(ctx, "register legacy image assets: %v", err)
+	}
+	a.reconcileAssets(ctx)
 
 	ctrl, err := platform.New(appWindowTitle)
 	if err != nil {
@@ -106,14 +114,44 @@ func (a *App) startup(ctx context.Context) {
 		Interval: 250 * time.Millisecond,
 	}
 	if a.platform != nil {
-		watcher.ReadImage = a.platform.ReadClipboardImage
-		watcher.ReadFiles = a.platform.ReadClipboardFiles
-		watcher.ReadRichText = a.platform.ReadClipboardRichText
+		if a.platform.ClipboardSnapshotSupported() {
+			watcher.ReadSnapshot = func() (clipboard.RawContent, error) {
+				snap, err := a.platform.ReadClipboardSnapshot()
+				if err != nil {
+					return clipboard.RawContent{}, err
+				}
+				// The native macOS snapshot intentionally only covers native
+				// representations; use Wails' text reader when no richer payload
+				// was present. Windows already returns CF_UNICODETEXT here.
+				if goruntime.GOOS == "darwin" && snap.Text == "" && snap.HTML == "" && snap.RTF == "" && len(snap.FilePaths) == 0 && len(snap.ImagePNG) == 0 {
+					if text, textErr := runtime.ClipboardGetText(ctx); textErr == nil {
+						snap.Text = text
+					}
+				}
+				return clipboard.RawContent{Text: snap.Text, HTML: snap.HTML, RTF: snap.RTF, FilePaths: snap.FilePaths,
+					ImageBytes: snap.ImagePNG, ImageWidth: snap.ImageWidth, ImageHeight: snap.ImageHeight}, nil
+			}
+			if changes, ok := a.platform.ClipboardChanges(); ok {
+				watcher.Changes = changes
+			}
+		} else {
+			watcher.ReadImage = a.platform.ReadClipboardImage
+			watcher.ReadFiles = a.platform.ReadClipboardFiles
+			watcher.ReadRichText = a.platform.ReadClipboardRichText
+		}
 		watcher.Sequence = a.platform.ClipboardSequence
 	}
 	go watcher.Start(watchCtx, func(raw clipboard.RawContent) {
 		source := a.resolveSourceApp()
+		// Serialize capture with asset reconciliation. A rich capture first writes an
+		// external image, then commits its DB reference; without this short critical
+		// section a concurrent settings/cleanup callback could observe the gap and
+		// remove the just-written file before the reference is committed. The native
+		// clipboard has already been closed by ReadClipboardSnapshot at this point,
+		// so this lock cannot affect the user's copy/paste operation.
+		a.assetMu.Lock()
 		item, _, err := a.clipboard.Capture(watchCtx, raw, source)
+		a.assetMu.Unlock()
 		if err != nil {
 			runtime.LogErrorf(ctx, "capture clipboard: %v", err)
 			return
@@ -124,6 +162,7 @@ func (a *App) startup(ctx context.Context) {
 		// card jumps to the top with its updated time, not just brand-new items.
 		if item.ID != "" {
 			runtime.EventsEmit(ctx, "history:changed", item.ID)
+			a.reconcileAssets(ctx)
 		}
 	})
 
@@ -143,6 +182,7 @@ func (a *App) startup(ctx context.Context) {
 			settings.Shortcut = "Cmd+Shift+V"
 		}
 		_ = repository.Cleanup(ctx, settings)
+		a.reconcileAssets(ctx)
 		a.applyShortcut(settings.Shortcut)
 		if a.platform != nil {
 			if err := a.platform.SetAutoLaunch(settings.LaunchAtLogin); err != nil {
@@ -189,6 +229,7 @@ func (a *App) startup(ctx context.Context) {
 			if settings, err := a.repository.GetSettings(a.ctx); err == nil {
 				a.applyShortcut(settings.Shortcut)
 				_ = a.repository.Cleanup(a.ctx, settings)
+				a.reconcileAssets(a.ctx)
 			}
 			runtime.EventsEmit(a.ctx, "history:changed")
 		})
@@ -445,6 +486,7 @@ func (a *App) DeleteItem(id string) error {
 	}
 	err := a.repository.Delete(a.ctx, id)
 	if err == nil {
+		a.reconcileAssets(a.ctx)
 		runtime.EventsEmit(a.ctx, "history:changed", id)
 	}
 	return err
@@ -669,7 +711,22 @@ func (a *App) CopyItem(id string) error {
 		// platform.Controller.WriteClipboardRichText's doc comment: the receiving app picks
 		// whichever format it understands (formatted in Word/Excel/PowerPoint/browsers, plain
 		// text everywhere else), so nothing here needs to know what's currently focused.
-		if err := a.platform.WriteClipboardRichText(item.HTML, item.RTF, item.Text); err == nil {
+		htmlPayload := item.HTML
+		if refs, refsErr := a.repository.AssetsForItem(a.ctx, item.ID); refsErr == nil && len(refs) > 0 {
+			byHash := make(map[string]clipboard.AssetRef, len(refs))
+			for _, ref := range refs {
+				byHash[ref.Hash] = ref
+			}
+			htmlPayload = clipboard.HydrateLocalImages(htmlPayload, func(hash string) ([]byte, string, error) {
+				ref, ok := byHash[hash]
+				if !ok {
+					return nil, "", os.ErrNotExist
+				}
+				data, err := os.ReadFile(ref.Path)
+				return data, ref.MIME, err
+			})
+		}
+		if err := a.platform.WriteClipboardRichText(htmlPayload, item.RTF, item.Text); err == nil {
 			return nil
 		}
 		// Fall through to the plain-text-only path below on error, so a rich-text write failure
@@ -819,4 +876,92 @@ func (s *diskImageStore) Save(hash string, data []byte) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+type diskAssetStore struct {
+	imagesDir string
+	richDir   string
+	mu        sync.Mutex
+}
+
+func (s *diskAssetStore) SaveAsset(data []byte, mimeType string) (clipboard.AssetRef, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sum := sha256.Sum256(data)
+	hash := hex.EncodeToString(sum[:])
+	ext := ".bin"
+	switch strings.ToLower(mimeType) {
+	case "image/jpeg":
+		ext = ".jpg"
+	case "image/gif":
+		ext = ".gif"
+	case "image/webp":
+		ext = ".webp"
+	case "image/bmp":
+		ext = ".bmp"
+	case "image/tiff":
+		ext = ".tiff"
+	default:
+		ext = ".png"
+	}
+	if err := os.MkdirAll(s.richDir, 0755); err != nil {
+		return clipboard.AssetRef{}, err
+	}
+	path := filepath.Join(s.richDir, hash+ext)
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			return clipboard.AssetRef{}, err
+		}
+	} else if err != nil {
+		return clipboard.AssetRef{}, err
+	}
+	return clipboard.AssetRef{Hash: hash, Path: path, MIME: mimeType, ByteSize: int64(len(data))}, nil
+}
+
+func (a *App) reconcileAssets(ctx context.Context) {
+	if a.assets == nil || a.repository == nil {
+		return
+	}
+	a.assetMu.Lock()
+	defer a.assetMu.Unlock()
+	_ = a.repository.PruneUnreferencedAssets(ctx)
+	paths, err := a.repository.ReferencedAssetPaths(ctx)
+	if err != nil {
+		return
+	}
+	_ = a.assets.Reconcile(paths)
+}
+
+func (s *diskAssetStore) Reconcile(active []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	keep := make(map[string]bool, len(active))
+	for _, p := range active {
+		if abs, err := filepath.Abs(p); err == nil {
+			keep[strings.ToLower(filepath.Clean(abs))] = true
+		}
+	}
+	for _, dir := range []string{s.imagesDir, s.richDir} {
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			p := filepath.Join(dir, entry.Name())
+			abs, err := filepath.Abs(p)
+			if err != nil {
+				continue
+			}
+			if !keep[strings.ToLower(filepath.Clean(abs))] {
+				_ = os.Remove(p)
+			}
+		}
+	}
+	return nil
 }

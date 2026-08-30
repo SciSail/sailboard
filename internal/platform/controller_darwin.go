@@ -66,6 +66,12 @@ func New(appName string) (Controller, error) {
 	return &darwinController{appName: appName}, nil
 }
 
+func (c *darwinController) ClipboardSnapshotSupported() bool          { return true }
+func (c *darwinController) ClipboardChanges() (<-chan struct{}, bool) { return nil, false }
+func (c *darwinController) ReadClipboardSnapshot() (ClipboardSnapshot, error) {
+	return readClipboardSnapshotDarwin(c)
+}
+
 // darwinHideDockIcon forces the app's activation policy to Accessory (no Dock icon, no Cmd+Tab
 // entry, menu-bar-only presence) — called from tray_darwin.go's ShowTray, not here; see that
 // method's doc comment for why Info.plist's LSUIElement key alone isn't enough and why ordering
