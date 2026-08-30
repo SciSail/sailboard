@@ -11,8 +11,6 @@
   <br />
   无需注册、无需登录、没有多余的功能。
   <br />
-  <strong>当前版本：v1.1（问题修复版）</strong>
-  <br />
   <a href="https://github.com/SciSail/sailboard"><strong>查看 SailBoard 仓库 »</strong></a>
 </p>
 
@@ -41,12 +39,7 @@
 
 ## 📥 下载使用
 
-Windows 和 macOS（Apple Silicon）已有编译好的安装包，从 [Releases 页面](https://github.com/SciSail/sailboard/releases/latest) 下载即可，无需自行编译：
-
-| 平台 | 下载 |
-| --- | --- |
-| Windows (x86-64) | [SailBoard_v1.1_Windows_x86.exe](https://github.com/SciSail/sailboard/releases/download/v1.1/SailBoard_v1.1_Windows_x86.exe) |
-| macOS (Apple Silicon) | [SailBoard_v1.1_Mac_arm64.dmg](https://github.com/SciSail/sailboard/releases/download/v1.1/SailBoard_v1.1_Mac_arm64.dmg) |
+Windows 和 macOS（Apple Silicon）已有编译好的安装包，请前往 [GitHub Releases](https://github.com/SciSail/sailboard/releases) 页面，在对应版本的 **Assets** 中选择适合你平台的文件下载，无需自行编译。
 
 macOS 首次打开需要在"系统设置 > 隐私与安全性"里允许运行（未签名 App 的标准提示），并在弹窗后授予一次"辅助功能"权限（自动粘贴注入需要）。
 
