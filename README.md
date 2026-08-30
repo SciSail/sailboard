@@ -61,8 +61,10 @@ wails build    # 打包，Windows 产物在 build/bin/SailBoard.exe
 
 macOS 上（需先装 Xcode Command Line Tools）：
 
+如果 zsh 提示 `wails: command not found`，说明 Go 的 bin 目录没有加入 PATH；推荐直接使用 Go 环境中的 Wails 路径（`"$(go env GOPATH)/bin/wails"`）：
+
 ```bash
-CGO_LDFLAGS="-framework UniformTypeIdentifiers" wails build -platform darwin/arm64 -clean
+CGO_LDFLAGS="-framework UniformTypeIdentifiers" "$(go env GOPATH)/bin/wails" build -platform darwin/arm64 -clean
 build/darwin/package-dmg.sh   # 产物 .app 打成 DMG，默认输出 build/bin/SailBoard-1.1.0-arm64.dmg
 ```
 
