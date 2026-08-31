@@ -15,7 +15,7 @@ button { color: inherit; cursor: pointer; }
    an absolutely-positioned overlay precisely so appearing/disappearing never changes this page's
    content height — a native OS/WebView scrollbar should never be able to appear here, regardless
    of DPI scaling or content-length edge cases. See progress.md's window-size fix for why this
-   window's actual on-screen size can't be fully trusted to match its logical 420x560 either. */
+   window's actual on-screen size can't be fully trusted to match its logical 420x640 either. */
 /* Top padding is taller than the other three sides specifically to reserve room for .notice below
    — an absolutely-positioned overlay that would otherwise sit on top of (not push down) the first
    row of controls. Reserved unconditionally (not just while a notice is showing) so the page's
@@ -32,6 +32,16 @@ button { color: inherit; cursor: pointer; }
 }
 .settings-page select:focus, .settings-page input:focus { border-color: var(--accent); }
 .settings-page label.check { display: flex; flex-direction: row; align-items: center; gap: 8px; color: var(--ink); }
+
+.settings-page label.history-limit-setting { position: relative; gap: 4px; margin-bottom: 13px; }
+.history-limit-value { position: absolute; top: 0; right: 0; color: var(--ink); font-weight: 600; }
+.settings-page input.history-limit-slider {
+  width: 100%; height: 20px; margin: 1px 0 0; padding: 0; border: 0; accent-color: var(--accent); cursor: pointer;
+}
+.history-limit-marks { display: flex; justify-content: space-between; color: var(--ink-soft); font-size: 10.5px; font-weight: 500; }
+.history-limit-marks span { min-width: 24px; text-align: center; }
+.history-limit-marks span:first-child { text-align: left; }
+.history-limit-marks span:last-child { text-align: right; }
 
 .shortcut-capture {
   width: 100%; padding: 9px 10px; border: 1px solid var(--hairline); border-radius: 9px;

@@ -3,6 +3,7 @@ package storage
 import (
 	"SailBoard/internal/clipboard"
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -228,4 +229,95 @@ func TestHasSettingsDistinguishesFreshInstallFromUnsavedDefaults(t *testing.T) {
 	if has, err := r.HasSettings(ctx); err != nil || !has {
 		t.Fatalf("HasSettings() after SaveSettings() = %v, %v; want true, nil", has, err)
 	}
+}
+
+func TestListSupportsConfiguredLargeAndUnlimitedLimits(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ctx := context.Background()
+	now := time.Now()
+	for i := 0; i < 350; i++ {
+		text := fmt.Sprintf("item-%03d", i)
+		item := clipboard.Item{ID: text, Type: clipboard.ContentText, Text: text, Hash: clipboard.HashText(text), CreatedAt: now.Add(time.Duration(i) * time.Second), LastUsedAt: now.Add(time.Duration(i) * time.Second)}
+		if _, _, err := r.Upsert(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items, err := r.List(ctx, 300, 0, false)
+	if err != nil || len(items) != 300 {
+		t.Fatalf("List(300) returned %d items, err=%v", len(items), err)
+	}
+	items, err = r.List(ctx, 0, 0, false)
+	if err != nil || len(items) != 350 {
+		t.Fatalf("List(unlimited) returned %d items, err=%v", len(items), err)
+	}
+}
+
+func TestHistoryDisplayLimitDefaultsAndPersists(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ctx := context.Background()
+
+	settings, err := r.GetSettings(ctx)
+	if err != nil || settings.HistoryDisplayLimit != 50 {
+		t.Fatalf("default HistoryDisplayLimit=%d, err=%v; want 50", settings.HistoryDisplayLimit, err)
+	}
+	settings.HistoryDisplayLimit = 300
+	if err := r.SaveSettings(ctx, settings); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = r.GetSettings(ctx)
+	if err != nil || settings.HistoryDisplayLimit != 300 {
+		t.Fatalf("saved HistoryDisplayLimit=%d, err=%v; want 300", settings.HistoryDisplayLimit, err)
+	}
+}
+
+func TestSearchMatchesChineseContentTypeLabels(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "search.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ctx := context.Background()
+	now := time.Now()
+	items := []clipboard.Item{
+		{ID: "file", Type: clipboard.ContentFile, Text: "report.docx", FilePath: "C:\\report.docx", Hash: "hash-file", CreatedAt: now, LastUsedAt: now},
+		{ID: "text", Type: clipboard.ContentText, Text: "plain note", Hash: "hash-text", CreatedAt: now.Add(-time.Second), LastUsedAt: now.Add(-time.Second)},
+		{ID: "image", Type: clipboard.ContentImage, Text: "", Hash: "hash-image", CreatedAt: now.Add(-2 * time.Second), LastUsedAt: now.Add(-2 * time.Second)},
+	}
+	for _, item := range items {
+		if _, _, err := r.Upsert(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertIDs := func(query string, want ...string) {
+		t.Helper()
+		got, err := r.Search(ctx, query, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("Search(%q) returned %d items, want %d", query, len(got), len(want))
+		}
+		seen := map[string]bool{}
+		for _, item := range got {
+			seen[item.ID] = true
+		}
+		for _, id := range want {
+			if !seen[id] {
+				t.Fatalf("Search(%q) missing %q; got=%v", query, id, got)
+			}
+		}
+	}
+	assertIDs("文件", "file")
+	assertIDs("文", "file", "text")
+	assertIDs("文本", "text")
+	assertIDs("图片", "image")
 }

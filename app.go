@@ -466,6 +466,12 @@ func (a *App) GetHistory(limit, offset int) ([]ClipboardItemDTO, error) {
 	if err := a.ready(); err != nil {
 		return nil, err
 	}
+	a.purgeMissingFiles()
+	// The frontend still supplies limit for API compatibility, but the user-facing setting is
+	// authoritative. A value of zero means no SQL LIMIT (see Repository.List).
+	if settings, err := a.repository.GetSettings(a.ctx); err == nil {
+		limit = settings.HistoryDisplayLimit
+	}
 	items, err := a.repository.List(a.ctx, limit, offset, false)
 	return a.toDTOs(items), err
 }
@@ -473,8 +479,49 @@ func (a *App) SearchHistory(query string, favoriteOnly bool) ([]ClipboardItemDTO
 	if err := a.ready(); err != nil {
 		return nil, err
 	}
+	a.purgeMissingFiles()
 	items, err := a.repository.Search(a.ctx, query, favoriteOnly)
 	return a.toDTOs(items), err
+}
+
+// purgeMissingFiles removes file clipboard entries whose original paths no longer exist. File
+// clipboard entries store one or more newline-separated paths; the entry is no longer usable as
+// soon as any one of those paths disappears. Stat errors other than a definite not-exist result
+// are left alone, since a temporary permission/network failure must not silently delete history.
+func (a *App) purgeMissingFiles() {
+	items, err := a.repository.List(a.ctx, 0, 0, false)
+	if err != nil {
+		return
+	}
+	removed := false
+	for _, item := range items {
+		if item.Type != clipboard.ContentFile || !filePathsMissing(item.FilePath) {
+			continue
+		}
+		if err := a.repository.Delete(a.ctx, item.ID); err == nil {
+			removed = true
+		}
+	}
+	if removed {
+		a.reconcileAssets(a.ctx)
+	}
+}
+
+func filePathsMissing(filePath string) bool {
+	paths := strings.Split(filePath, "\n")
+	if len(paths) == 0 {
+		return true
+	}
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			return true
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return true
+		}
+	}
+	return false
 }
 func (a *App) ToggleFavorite(id string) error {
 	if err := a.ready(); err != nil {
@@ -694,6 +741,15 @@ func (a *App) CopyItem(id string) error {
 	if item.Type == clipboard.ContentFile {
 		if a.platform == nil {
 			return errors.New("file clipboard support is not yet available")
+		}
+		if filePathsMissing(item.FilePath) {
+			// The card may have been loaded before the user moved/deleted one of its files.
+			// Remove the stale option immediately instead of silently copying only a subset.
+			if deleteErr := a.repository.Delete(a.ctx, item.ID); deleteErr == nil {
+				a.reconcileAssets(a.ctx)
+				runtime.EventsEmit(a.ctx, "history:changed", item.ID)
+			}
+			return errors.New("file(s) no longer exist at their original location")
 		}
 		var existing []string
 		for _, p := range strings.Split(item.FilePath, "\n") {

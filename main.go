@@ -48,10 +48,11 @@ const settingsFlag = "--settings"
 // is laid out against at 100% display scaling) — passed both to wails.Run's options.App and, on
 // Windows, to platform.FixSettingsWindowDirect, which re-applies them scaled by the window's
 // actual monitor DPI (see that function's doc comment for why Wails' own scaling isn't trusted
-// here).
+// here). The extra vertical room keeps the complete settings form, including the bottom action
+// buttons, visible after adding the history display-limit control.
 const (
 	settingsWindowWidth  = 420
-	settingsWindowHeight = 560
+	settingsWindowHeight = 640
 )
 
 func main() {

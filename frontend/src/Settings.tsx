@@ -57,6 +57,9 @@ const RESERVED_COMBOS = new Set([
   "Alt+TAB", "Alt+F4",
 ]);
 
+const HISTORY_LIMITS = [10, 50, 100, 300, 0] as const;
+const historyLimitLabel = (limit: number) => limit === 0 ? "不限制" : `${limit} 条`;
+
 export default function Settings() {
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [saving, setSaving] = useState(false);
@@ -195,6 +198,22 @@ export default function Settings() {
         </select>
       </label>
     </div>
+    <label className="history-limit-setting">主页显示数量
+      <div className="history-limit-value">{historyLimitLabel(settings.historyDisplayLimit)}</div>
+      <input
+        className="history-limit-slider"
+        type="range"
+        min="0"
+        max={HISTORY_LIMITS.length - 1}
+        step="1"
+        value={Math.max(0, HISTORY_LIMITS.indexOf(settings.historyDisplayLimit as typeof HISTORY_LIMITS[number]))}
+        onChange={event => setSettings({ ...settings, historyDisplayLimit: HISTORY_LIMITS[Number(event.target.value)] })}
+        aria-label="主页显示数量"
+      />
+      <div className="history-limit-marks" aria-hidden="true">
+        {HISTORY_LIMITS.map(limit => <span key={limit}>{limit === 0 ? "不限制" : limit}</span>)}
+      </div>
+    </label>
     <label>全局快捷键
       <button type="button" className={capturing ? "shortcut-capture capturing" : "shortcut-capture"} onClick={() => { setNotice(""); setCapturing(true); }}>
         {capturing ? "请按下快捷键组合…（Esc 取消）" : settings.shortcut || "点击设置快捷键"}

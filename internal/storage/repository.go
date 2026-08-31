@@ -14,10 +14,11 @@ import (
 type Repository struct{ db *sql.DB }
 
 type Settings struct {
-	RetentionDays   int    `json:"retentionDays"`
-	MaxStorageBytes int64  `json:"maxStorageBytes"`
-	Shortcut        string `json:"shortcut"`
-	LaunchAtLogin   bool   `json:"launchAtLogin"`
+	RetentionDays       int    `json:"retentionDays"`
+	MaxStorageBytes     int64  `json:"maxStorageBytes"`
+	HistoryDisplayLimit int    `json:"historyDisplayLimit"`
+	Shortcut            string `json:"shortcut"`
+	LaunchAtLogin       bool   `json:"launchAtLogin"`
 }
 
 func Open(path string) (*Repository, error) {
@@ -296,8 +297,12 @@ func (r *Repository) scanRow(row *sql.Row, item *clipboard.Item) error {
 }
 
 func (r *Repository) List(ctx context.Context, limit, offset int, favoritesOnly bool) ([]clipboard.Item, error) {
-	if limit <= 0 || limit > 100 {
+	if limit < 0 {
 		limit = 50
+	}
+	if limit == 0 {
+		query := selectItemSummary + " WHERE (? = 0 OR is_favorite=1) ORDER BY last_used_at DESC LIMIT -1 OFFSET ?"
+		return r.query(ctx, query, boolInt(favoritesOnly), offset)
 	}
 	query := selectItemSummary + " WHERE (? = 0 OR is_favorite=1) ORDER BY last_used_at DESC LIMIT ? OFFSET ?"
 	return r.query(ctx, query, boolInt(favoritesOnly), limit, offset)
@@ -305,8 +310,18 @@ func (r *Repository) List(ctx context.Context, limit, offset int, favoritesOnly 
 
 func (r *Repository) Search(ctx context.Context, value string, favoritesOnly bool) ([]clipboard.Item, error) {
 	needle := "%" + value + "%"
-	query := selectItemSummary + ` WHERE (? = 0 OR is_favorite=1) AND (text_content LIKE ? COLLATE NOCASE OR source_app_name LIKE ? COLLATE NOCASE) ORDER BY last_used_at DESC LIMIT 100`
-	return r.query(ctx, query, boolInt(favoritesOnly), needle, needle)
+	query := selectItemSummary + ` WHERE (? = 0 OR is_favorite=1) AND (
+		text_content LIKE ? COLLATE NOCASE OR source_app_name LIKE ? COLLATE NOCASE OR
+		CASE content_type
+			WHEN 'text' THEN '文本'
+			WHEN 'url' THEN '链接'
+			WHEN 'image' THEN '图片'
+			WHEN 'file' THEN '文件'
+			WHEN 'color' THEN '颜色'
+			ELSE content_type
+		END LIKE ? COLLATE NOCASE
+	) ORDER BY last_used_at DESC LIMIT 100`
+	return r.query(ctx, query, boolInt(favoritesOnly), needle, needle, needle)
 }
 
 func (r *Repository) query(ctx context.Context, query string, args ...any) ([]clipboard.Item, error) {
@@ -415,6 +430,8 @@ func (r *Repository) GetSettings(ctx context.Context) (Settings, error) {
 			fmt.Sscan(value, &s.RetentionDays)
 		case "max_storage_bytes":
 			fmt.Sscan(value, &s.MaxStorageBytes)
+		case "history_display_limit":
+			fmt.Sscan(value, &s.HistoryDisplayLimit)
 		case "shortcut":
 			s.Shortcut = value
 		case "launch_at_login":
@@ -424,7 +441,7 @@ func (r *Repository) GetSettings(ctx context.Context) (Settings, error) {
 	return s, rows.Err()
 }
 func (r *Repository) SaveSettings(ctx context.Context, s Settings) error {
-	values := map[string]string{"retention_days": fmt.Sprint(s.RetentionDays), "max_storage_bytes": fmt.Sprint(s.MaxStorageBytes), "shortcut": s.Shortcut, "launch_at_login": fmt.Sprint(s.LaunchAtLogin)}
+	values := map[string]string{"retention_days": fmt.Sprint(s.RetentionDays), "max_storage_bytes": fmt.Sprint(s.MaxStorageBytes), "history_display_limit": fmt.Sprint(s.HistoryDisplayLimit), "shortcut": s.Shortcut, "launch_at_login": fmt.Sprint(s.LaunchAtLogin)}
 	for k, v := range values {
 		if _, err := r.db.ExecContext(ctx, "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, v); err != nil {
 			return err
@@ -436,7 +453,7 @@ func (r *Repository) SaveSettings(ctx context.Context, s Settings) error {
 // DefaultSettings returns the settings a fresh install starts with — also what "restore
 // defaults" in the settings UI resets the form to (see SettingsApp.GetDefaultSettings).
 func DefaultSettings() Settings {
-	return Settings{RetentionDays: 30, MaxStorageBytes: 1 << 30, Shortcut: "Ctrl+Shift+V"}
+	return Settings{RetentionDays: 30, MaxStorageBytes: 1 << 30, HistoryDisplayLimit: 50, Shortcut: "Ctrl+Shift+V"}
 }
 func boolInt(value bool) int {
 	if value {

@@ -12,6 +12,7 @@
 export interface SettingsData {
   retentionDays: number;
   maxStorageBytes: number;
+  historyDisplayLimit: number;
   shortcut: string;
   launchAtLogin: boolean;
 }
