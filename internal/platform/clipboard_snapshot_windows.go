@@ -4,10 +4,13 @@ package platform
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"image/png"
 	"syscall"
 	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -27,11 +30,20 @@ func readClipboardSnapshot() (ClipboardSnapshot, error) {
 	}
 
 	if isClipboardFormatAvailable(cfHDrop) {
-		if paths := readClipboardFilesLockedSnapshot(); len(paths) > 0 {
-			procCloseClipboard.Call()
+		// Explorer commonly exposes CF_HDROP through delayed Shell/OLE
+		// rendering. Copy its one HGLOBAL block and close the clipboard before
+		// parsing any paths; enumerating thousands of entries while the global
+		// clipboard is open would block every other application's copy/paste.
+		block := readClipboardBlockLocked(cfHDrop, maxClipboardFilesBytes)
+		procCloseClipboard.Call()
+		if paths := decodeClipboardFilesBlock(block, maxClipboardFileCount); len(paths) > 0 {
 			snap.FilePaths = paths
-			return snap, nil
 		}
+		// A clipboard advertising CF_HDROP is a file copy even if its delayed
+		// payload was unavailable or malformed. Do not reopen it to probe rich
+		// text/image fallbacks; missing one history capture is safer than
+		// competing with the user's file operation.
+		return snap, nil
 	}
 
 	htmlFormat := registeredClipboardFormat("HTML Format")
@@ -182,32 +194,79 @@ func readUnicodeTextLimitedLocked(max int) string {
 	return syscall.UTF16ToString(unsafe.Slice((*uint16)(unsafe.Pointer(ptr)), int(size)/2))
 }
 
-func readClipboardFilesLockedSnapshot() []string {
-	hDrop, _, _ := procGetClipboardData.Call(cfHDrop)
-	if hDrop == 0 {
+// decodeClipboardFilesBlock parses a copied CF_HDROP HGLOBAL after the system
+// clipboard has already been closed. DROPFILES contains a byte offset followed
+// by a double-NUL-terminated path list, normally UTF-16 on modern Windows.
+func decodeClipboardFilesBlock(data []byte, maxCount int) []string {
+	const dropFilesHeaderBytes = 20
+	if len(data) < dropFilesHeaderBytes || maxCount <= 0 {
 		return nil
 	}
-	count, _, _ := procDragQueryFile.Call(hDrop, 0xFFFFFFFF, 0, 0)
-	if count == 0 {
+	offset := int(binary.LittleEndian.Uint32(data[0:4]))
+	if offset < dropFilesHeaderBytes || offset >= len(data) {
 		return nil
 	}
-	if count > maxClipboardFileCount {
-		count = maxClipboardFileCount
+	payload := data[offset:]
+	wide := binary.LittleEndian.Uint32(data[16:20]) != 0
+	paths := make([]string, 0, 1)
+	if wide {
+		if len(payload) < 4 {
+			return nil
+		}
+		if len(payload)%2 != 0 {
+			payload = payload[:len(payload)-1]
+		}
+		units := unsafe.Slice((*uint16)(unsafe.Pointer(&payload[0])), len(payload)/2)
+		start := 0
+		for i, unit := range units {
+			if unit != 0 {
+				continue
+			}
+			if i == start {
+				break
+			}
+			paths = append(paths, syscall.UTF16ToString(units[start:i]))
+			if len(paths) >= maxCount {
+				break
+			}
+			start = i + 1
+		}
+		return paths
 	}
-	paths := make([]string, 0, count)
-	var total int
-	for i := uintptr(0); i < count; i++ {
-		n, _, _ := procDragQueryFile.Call(hDrop, i, 0, 0)
-		if n == 0 || total > maxClipboardFilesBytes-int(n+1)*2 {
+
+	// Legacy producers may set fWide=FALSE and use the active Windows ANSI
+	// code page. Convert each entry explicitly instead of assuming UTF-8.
+	start := 0
+	for i, b := range payload {
+		if b != 0 {
 			continue
 		}
-		buf := make([]uint16, int(n)+1)
-		got, _, _ := procDragQueryFile.Call(hDrop, i, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-		if got == 0 {
-			continue
+		if i == start {
+			break
 		}
-		paths = append(paths, syscall.UTF16ToString(buf[:got]))
-		total += int((got + 1) * 2)
+		if path := ansiClipboardPath(payload[start:i]); path != "" {
+			paths = append(paths, path)
+		}
+		if len(paths) >= maxCount {
+			break
+		}
+		start = i + 1
 	}
 	return paths
+}
+
+func ansiClipboardPath(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	needed, err := windows.MultiByteToWideChar(0, 0, &data[0], int32(len(data)), nil, 0)
+	if err != nil || needed <= 0 {
+		return ""
+	}
+	wide := make([]uint16, needed)
+	written, err := windows.MultiByteToWideChar(0, 0, &data[0], int32(len(data)), &wide[0], needed)
+	if err != nil || written <= 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(wide[:written])
 }

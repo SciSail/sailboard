@@ -133,6 +133,16 @@ func (a *App) startup(ctx context.Context) {
 			}
 			if changes, ok := a.platform.ClipboardChanges(); ok {
 				watcher.Changes = changes
+				if goruntime.GOOS == "windows" {
+					// Explorer publishes file-copy data through delayed Shell/OLE
+					// formats. WM_CLIPBOARDUPDATE tells us content changed, but it
+					// does not guarantee those formats have finished rendering. Give
+					// the system a quiet window and retry gently: capture latency is
+					// preferable to competing with the user's own copy/paste.
+					watcher.SettleDelay = 600 * time.Millisecond
+					watcher.RetryDelay = 600 * time.Millisecond
+					watcher.MaxRetryDelay = 2 * time.Second
+				}
 			}
 		} else {
 			watcher.ReadImage = a.platform.ReadClipboardImage

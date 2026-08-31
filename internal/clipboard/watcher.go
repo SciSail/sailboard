@@ -42,6 +42,17 @@ type Watcher struct {
 	// tearing down and rebuilding the polling goroutine.
 	IsPaused func() bool
 	Interval time.Duration
+	// SettleDelay is the quiet period after a native change notification before
+	// the clipboard is opened. Windows file copies publish Shell/OLE formats
+	// asynchronously, so reading immediately from WM_CLIPBOARDUPDATE can compete
+	// with Explorer even though the notification itself is delivered after Ctrl+C.
+	SettleDelay time.Duration
+	// RetryDelay is the initial wait after a transient read failure. Keeping this
+	// separate from Interval prevents an OpenClipboard failure from turning into
+	// an aggressive retry loop while the source application is still publishing.
+	RetryDelay time.Duration
+	// MaxRetryDelay caps the exponential retry backoff.
+	MaxRetryDelay time.Duration
 }
 
 func (w Watcher) Start(ctx context.Context, onChange func(RawContent)) {
@@ -65,9 +76,22 @@ func (w Watcher) Start(ctx context.Context, onChange func(RawContent)) {
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	pending := true // capture the current clipboard once at startup
-	const debounce = 40 * time.Millisecond
-	retryDelay := 25 * time.Millisecond
-	const maxRetryDelay = time.Second
+	settleDelay := w.SettleDelay
+	if settleDelay <= 0 {
+		settleDelay = 40 * time.Millisecond
+	}
+	initialRetryDelay := w.RetryDelay
+	if initialRetryDelay <= 0 {
+		initialRetryDelay = 25 * time.Millisecond
+	}
+	retryDelay := initialRetryDelay
+	maxRetryDelay := w.MaxRetryDelay
+	if maxRetryDelay < initialRetryDelay {
+		maxRetryDelay = time.Second
+		if maxRetryDelay < initialRetryDelay {
+			maxRetryDelay = initialRetryDelay
+		}
+	}
 
 	read := w.ReadSnapshot
 	if read == nil {
@@ -116,7 +140,11 @@ func (w Watcher) Start(ctx context.Context, onChange func(RawContent)) {
 		}
 		timerC = timer.C
 	}
-	schedule(0)
+	if changes != nil {
+		schedule(settleDelay)
+	} else {
+		schedule(0)
+	}
 	defer func() {
 		if timer != nil {
 			timer.Stop()
@@ -137,10 +165,19 @@ func (w Watcher) Start(ctx context.Context, onChange func(RawContent)) {
 				continue
 			}
 			pending = true
-			schedule(debounce)
+			// Every new notification restarts the quiet period. Explorer can
+			// publish several delayed Shell/OLE formats for one file copy; opening
+			// the clipboard between those updates is the contention we avoid.
+			schedule(settleDelay)
 		case <-ticker.C:
 			pending = true
-			schedule(0)
+			if changes != nil {
+				// The safety poll must obey the same quiet period as event-driven
+				// reads, otherwise it can reintroduce the race every two seconds.
+				schedule(settleDelay)
+			} else {
+				schedule(0)
+			}
 		case <-timerC:
 			timerC = nil
 			if !pending {
@@ -157,7 +194,7 @@ func (w Watcher) Start(ctx context.Context, onChange func(RawContent)) {
 			}
 			if seqOK && haveSeq && seq == lastSeq {
 				pending = false
-				retryDelay = 25 * time.Millisecond
+				retryDelay = initialRetryDelay
 				continue
 			}
 			raw, err := read()
@@ -177,7 +214,7 @@ func (w Watcher) Start(ctx context.Context, onChange func(RawContent)) {
 				haveSeq, lastSeq = true, seq
 			}
 			pending = false
-			retryDelay = 25 * time.Millisecond
+			retryDelay = initialRetryDelay
 			if hasContent(raw) {
 				onChange(raw)
 			}

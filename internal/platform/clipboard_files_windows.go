@@ -19,31 +19,12 @@ func readClipboardFiles() (paths []string, ok bool) {
 	if opened, _, _ := procOpenClipboard.Call(0); opened == 0 {
 		return nil, false
 	}
-
-	hDrop, _, _ := procGetClipboardData.Call(cfHDrop)
-	if hDrop == 0 {
-		procCloseClipboard.Call()
-		return nil, false
-	}
-	count, _, _ := procDragQueryFile.Call(hDrop, 0xFFFFFFFF, 0, 0)
-	if count == 0 {
-		procCloseClipboard.Call()
-		return nil, false
-	}
-
-	result := make([]string, 0, count)
-	buf := make([]uint16, 1024)
-	for i := uintptr(0); i < count; i++ {
-		n, _, _ := procDragQueryFile.Call(hDrop, i, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
-		if n == 0 {
-			continue
-		}
-		result = append(result, syscall.UTF16ToString(buf[:n]))
-	}
-	// Everything needed has already been copied into Go strings above; release the clipboard
-	// before returning rather than holding it through the caller's own processing.
+	// Copy the one raw DROPFILES block, release the system clipboard immediately,
+	// and only then enumerate/decode paths. This legacy entry point follows the
+	// same no-long-held-lock rule as readClipboardSnapshot.
+	block := readClipboardBlockLocked(cfHDrop, maxClipboardFilesBytes)
 	procCloseClipboard.Call()
-
+	result := decodeClipboardFilesBlock(block, maxClipboardFileCount)
 	if len(result) == 0 {
 		return nil, false
 	}
